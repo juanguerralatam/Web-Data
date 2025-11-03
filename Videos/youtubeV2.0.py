@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Config:
-    CSV_FILE: Path = Path("videos_statistics.csv")
+    CSV_FILE: Path = Path("download.csv")
     ARCHIVE_FILE: Path = Path("downloaded_videos.txt")
     OUTPUT_DIR: Path = Path.home() / "Downloads" / "YouTube"
     BUCKET_NAME: str = "b2b-juanguerra"
@@ -26,7 +26,7 @@ class Config:
     FORCE_REDOWNLOAD: bool = False
     MAX_VIDEOS: int = 25000
     VISITOR_DATA: Optional[str] = None
-    COOKIES_FILES: List[Path] = field(default_factory=lambda: [Path("co_cookies.txt"), Path("ec_cookies.txt"), Path("ru_cookies.txt"), Path("zh_cookies.txt"), Path("hk_cookies.txt")])
+    COOKIES_FILES: List[Path] = field(default_factory=lambda: [Path("Cookies/co_cookies.txt"), Path("Cookies/ec_cookies.txt"), Path("Cookies/ru_cookies.txt"), Path("Cookies/zh_cookies.txt"), Path("Cookies/hk_cookies.txt")])
     COOKIES_FROM_BROWSER: Optional[str] = "chrome"
     CPU_COUNT: int = random.randint(4, 8)
     CONCURRENT_FRAGMENTS: int = random.randint(4, 16)
@@ -214,10 +214,12 @@ class StatusTracker:
             video_id = d.get('info_dict', {}).get('id')
             if video_id:
                 self.succeeded.add(video_id)
+                update_csv_status(video_id, "done")
         elif d['status'] == 'error':
             video_id = d.get('info_dict', {}).get('id')
             if video_id:
                 self.failed.add(video_id)
+                update_csv_status(video_id, "failed")
 def emergency_cleanup(min_space_gb: float = 1.0):
     free_gb = shutil.disk_usage(config.OUTPUT_DIR).free / (1024**3)
     if free_gb < min_space_gb:
@@ -246,6 +248,42 @@ def rotate_cookies() -> str:
     if not valid_files:
         return None
     return str(random.choice(valid_files))
+
+def update_csv_status(video_id: str, status: str):
+    """Update the status of a video in the CSV file.
+    
+    Args:
+        video_id: The YouTube video ID
+        status: One of 'in_progress', 'done', 'failed'
+    """
+    if not config.CSV_FILE.exists():
+        return
+
+    temp_file = config.CSV_FILE.with_suffix('.tmp')
+    found = False
+    
+    try:
+        with config.CSV_FILE.open('r', newline='', encoding='utf-8') as csvfile, \
+             temp_file.open('w', newline='', encoding='utf-8') as tempfile:
+            reader = csv.DictReader(csvfile)
+            writer = csv.DictWriter(tempfile, fieldnames=reader.fieldnames + ['status'] if 'status' not in reader.fieldnames else reader.fieldnames)
+            writer.writeheader()
+            
+            for row in reader:
+                url = row.get('video_url', '')
+                if video_id in url or video_id == extract_video_id(url):
+                    row['status'] = status
+                    found = True
+                writer.writerow(row)
+                
+        if found:
+            temp_file.replace(config.CSV_FILE)
+        else:
+            temp_file.unlink()
+    except Exception as e:
+        log.error(f"Failed to update CSV status: {e}")
+        if temp_file.exists():
+            temp_file.unlink()
 
 def retry_failed_downloads(failed_urls: List[str], max_retries: int = 3) -> Tuple[int, int]:
     total_success, total_fail = 0, 0
@@ -278,6 +316,11 @@ def download_batch(urls: List[str]) -> Tuple[int, int]:
             ydl.add_post_processor(uploader, when='after_move')
         
         ydl.add_progress_hook(status_tracker.hook)
+        
+        # Mark videos as in_progress before starting
+        for url in urls:
+            video_id = extract_video_id(url)
+            update_csv_status(video_id, "in_progress")
 
         try:
             ydl.download(urls)
